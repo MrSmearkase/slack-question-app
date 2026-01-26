@@ -1,19 +1,17 @@
 {
-  "name": "unified-notifications-app",
+  "name": "slack-question-app",
   "version": "1.0.0",
-  "description": "A unified notifications aggregator for Twitter, Reddit, Instagram, and Chess.com",
+  "description": "A Slack app for posting questions and collecting anonymous responses with voting",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
     "dev": "node app.js"
   },
-  "keywords": ["notifications", "social-media", "aggregator", "twitter", "reddit", "instagram", "chess"],
+  "keywords": ["slack", "bot", "questions", "voting"],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "axios": "^1.6.0",
-    "dotenv": "^16.3.1",
-    "node-cron": "^3.0.3"
+    "@slack/bolt": "^3.17.1",
+    "dotenv": "^16.3.1"
   }
 }

@@ -18,6 +18,7 @@ oauth_config:
       - chat:write.public
       - commands
       - reactions:read
+      - reactions:write
       - channels:read
       - groups:read
       - im:read

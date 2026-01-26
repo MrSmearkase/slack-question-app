@@ -1,160 +1,479 @@
-const express = require('express');
+const { App } = require('@slack/bolt');
+const fs = require('fs');
 const path = require('path');
-const cron = require('node-cron');
 require('dotenv').config();
 
-const twitterService = require('./services/twitter');
-const redditService = require('./services/reddit');
-const instagramService = require('./services/instagram');
-const chessService = require('./services/chess');
-const notificationAggregator = require('./services/aggregator');
+// Set up file logging
+const logFile = path.join(__dirname, 'app.log');
+const logStream = fs.createWriteStream(logFile, { flags: 'a' });
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Middleware
-app.use(express.json());
-app.use(express.static('public'));
-
-// Store notifications in memory (in production, use a database)
-let notifications = [];
-let lastFetchTime = new Date();
-
-// Track fetch errors
-const fetchErrors = {
-  twitter: null,
-  reddit: null,
-  instagram: null,
-  chess: null
+// Override console.log to also write to file
+const originalLog = console.log;
+console.log = function(...args) {
+  const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)).join(' ');
+  const timestamp = new Date().toISOString();
+  logStream.write(`[${timestamp}] ${message}\n`);
+  originalLog.apply(console, args);
 };
 
-// Fetch notifications from all sources
-async function fetchAllNotifications() {
-  console.log('🔄 Fetching notifications from all sources...');
-  const allNotifications = [];
+const originalError = console.error;
+console.error = function(...args) {
+  const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)).join(' ');
+  const timestamp = new Date().toISOString();
+  logStream.write(`[${timestamp}] ERROR: ${message}\n`);
+  originalError.apply(console, args);
+};
 
+// Initialize the Slack app
+const app = new App({
+  token: process.env.SLACK_BOT_TOKEN,
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  socketMode: true,
+  appToken: process.env.SLACK_APP_TOKEN,
+});
+
+// Store for tracking responses and votes
+// In production, you'd want to use a database
+const questionStore = new Map(); // questionId -> { question, channel, ts, responses: [] }
+const responseStore = new Map(); // responseId -> { questionId, text, ts, upvotes: Set, downvotes: Set }
+
+// Generate unique IDs
+function generateId() {
+  return Date.now().toString(36) + Math.random().toString(36).substr(2);
+}
+
+// Calculate points for a response
+function calculatePoints(responseId) {
+  const response = responseStore.get(responseId);
+  if (!response) return 0;
+  return response.upvotes.size - response.downvotes.size;
+}
+
+// Update response message with point total
+async function updateResponseMessage(responseId) {
+  const response = responseStore.get(responseId);
+  if (!response) {
+    console.log('⚠️ Response not found for ID:', responseId);
+    return;
+  }
+
+  const question = questionStore.get(response.questionId);
+  if (!question) {
+    console.log('⚠️ Question not found for response:', responseId);
+    return;
+  }
+
+  const points = calculatePoints(responseId);
+  const pointsText = points > 0 ? `+${points}` : points.toString();
+  
+  console.log(`🔄 Updating response ${responseId} with points: ${pointsText}`);
+  console.log(`   Channel: ${question.channel}, Timestamp: ${response.ts}`);
+  
   try {
-    // Twitter @Sam_Copeland
-    try {
-      const twitter1 = await twitterService.getNotifications('Sam_Copeland');
-      allNotifications.push(...twitter1);
-      fetchErrors.twitter = null;
-    } catch (error) {
-      console.error('Error fetching Twitter @Sam_Copeland:', error.message);
-      fetchErrors.twitter = error.message;
-    }
-
-    // Twitter samcopelandchess
-    try {
-      const twitter2 = await twitterService.getNotifications('samcopelandchess');
-      allNotifications.push(...twitter2);
-    } catch (error) {
-      console.error('Error fetching Twitter samcopelandchess:', error.message);
-    }
-
-    // Reddit
-    try {
-      const reddit = await redditService.getNotifications('SamSCopeland');
-      allNotifications.push(...reddit);
-      fetchErrors.reddit = null;
-    } catch (error) {
-      console.error('Error fetching Reddit:', error.message);
-      fetchErrors.reddit = error.message;
-    }
-
-    // Instagram
-    try {
-      const instagram = await instagramService.getNotifications('sam_copeland');
-      allNotifications.push(...instagram);
-      fetchErrors.instagram = null;
-    } catch (error) {
-      console.error('Error fetching Instagram:', error.message);
-      fetchErrors.instagram = error.message;
-    }
-
-    // Chess.com
-    try {
-      const chess = await chessService.getNotifications();
-      allNotifications.push(...chess);
-      fetchErrors.chess = null;
-    } catch (error) {
-      console.error('Error fetching Chess.com:', error.message);
-      fetchErrors.chess = error.message;
-    }
-
-    // Merge with existing notifications, avoiding duplicates
-    const existingIds = new Set(notifications.map(n => n.id));
-    const newNotifications = allNotifications.filter(n => !existingIds.has(n.id));
+    const result = await app.client.chat.update({
+      channel: question.channel,
+      ts: response.ts,
+      text: `${response.text}\n\n*Points: ${pointsText}*`,
+    });
     
-    notifications = [...newNotifications, ...notifications]
-      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-      .slice(0, 1000); // Keep last 1000 notifications
-
-    lastFetchTime = new Date();
-    console.log(`✅ Fetched ${newNotifications.length} new notifications. Total: ${notifications.length}`);
+    if (result.ok) {
+      console.log(`✅✅✅ Successfully updated response ${responseId} - Message updated in Slack! ✅✅✅`);
+      console.log(`   New points: ${pointsText}`);
+    } else {
+      console.error(`❌ Update API call failed: ${result.error}`);
+      if (result.error === 'message_not_found') {
+        console.error('   The message may have been deleted or the timestamp is incorrect');
+      } else if (result.error === 'cant_update_message') {
+        console.error('   Bot does not have permission to update this message');
+      }
+    }
   } catch (error) {
-    console.error('❌ Error fetching notifications:', error);
+    console.error('❌ Exception updating response message:', error);
+    console.error('   Error details:', {
+      message: error.message,
+      code: error.code,
+      data: error.data
+    });
   }
 }
 
-// API Routes
-app.get('/api/notifications', (req, res) => {
-  const limit = parseInt(req.query.limit) || 50;
-  const offset = parseInt(req.query.offset) || 0;
-  const source = req.query.source;
-  const type = req.query.type;
-
-  let filtered = notifications;
-
-  if (source) {
-    filtered = filtered.filter(n => n.source === source);
+// Command to post a question
+app.command('/ask-question', async ({ command, ack, respond, client }) => {
+  console.log('✅ Command received:', JSON.stringify(command, null, 2));
+  try {
+    await ack();
+    console.log('✅ Command acknowledged');
+  } catch (error) {
+    console.error('❌ Error acknowledging command:', error);
+    return;
   }
 
-  if (type) {
-    filtered = filtered.filter(n => n.type === type);
+  const questionText = command.text ? command.text.trim() : '';
+  if (!questionText) {
+    await respond('Please provide a question. Usage: /ask-question <your question>');
+    return;
   }
 
-  const paginated = filtered.slice(offset, offset + limit);
+  try {
+    const questionId = generateId();
+    const result = await client.chat.postMessage({
+      channel: command.channel_id,
+      text: `*Question:* ${questionText}`,
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Question:* ${questionText}`,
+          },
+        },
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'button',
+              text: {
+                type: 'plain_text',
+                text: 'Respond',
+              },
+              action_id: 'respond_to_question',
+              value: questionId,
+            },
+          ],
+        },
+      ],
+    });
 
-  res.json({
-    notifications: paginated,
-    total: filtered.length,
-    lastFetch: lastFetchTime
+    // Store question
+    questionStore.set(questionId, {
+      question: questionText,
+      channel: command.channel_id,
+      ts: result.ts,
+      responses: [],
+    });
+
+    await respond('Question posted!');
+  } catch (error) {
+    console.error('Error posting question:', error);
+    await respond('Failed to post question. Please try again.');
+  }
+});
+
+// Handle response button click
+app.action('respond_to_question', async ({ ack, body, client }) => {
+  await ack();
+
+  const questionId = body.actions[0].value;
+  const question = questionStore.get(questionId);
+
+  if (!question) {
+    await client.chat.postEphemeral({
+      channel: body.channel.id,
+      user: body.user.id,
+      text: 'Question not found.',
+    });
+    return;
+  }
+
+  // Open modal for response
+  try {
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'response_modal',
+        title: {
+          type: 'plain_text',
+          text: 'Submit Response',
+        },
+        submit: {
+          type: 'plain_text',
+          text: 'Submit',
+        },
+        close: {
+          type: 'plain_text',
+          text: 'Cancel',
+        },
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Question:* ${question.question}`,
+            },
+          },
+          {
+            type: 'input',
+            block_id: 'response_input',
+            element: {
+              type: 'plain_text_input',
+              action_id: 'response_text',
+              multiline: true,
+              placeholder: {
+                type: 'plain_text',
+                text: 'Enter your response...',
+              },
+            },
+            label: {
+              type: 'plain_text',
+              text: 'Your Response',
+            },
+          },
+        ],
+        private_metadata: questionId,
+      },
+    });
+  } catch (error) {
+    console.error('Error opening modal:', error);
+  }
+});
+
+// Handle modal submission
+app.view('response_modal', async ({ ack, body, view, client }) => {
+  await ack();
+
+  const questionId = view.private_metadata;
+  const question = questionStore.get(questionId);
+  const responseText = view.state.values.response_input.response_text.value.trim();
+
+  if (!responseText) {
+    return;
+  }
+
+  if (!question) {
+    return;
+  }
+
+  try {
+    // Post anonymous response in thread
+    const result = await client.chat.postMessage({
+      token: process.env.SLACK_BOT_TOKEN,
+      channel: question.channel,
+      thread_ts: question.ts,
+      text: `${responseText}\n\n*Points: 0*`,
+    });
+
+    const responseId = generateId();
+    responseStore.set(responseId, {
+      questionId: questionId,
+      text: responseText,
+      ts: result.ts,
+      upvotes: new Set(),
+      downvotes: new Set(),
+    });
+
+    question.responses.push(responseId);
+    
+    console.log(`✅ Response posted and tracked:`);
+    console.log(`   Response ID: ${responseId}`);
+    console.log(`   Timestamp: ${result.ts}`);
+    console.log(`   Channel: ${question.channel}`);
+
+    // Automatically add thumbs up and thumbs down reactions to the response
+    try {
+      // Add thumbs up reaction - use the token explicitly
+      await app.client.reactions.add({
+        token: process.env.SLACK_BOT_TOKEN,
+        channel: question.channel,
+        timestamp: result.ts,
+        name: '+1' // Slack's standard thumbs up emoji name
+      });
+      console.log('✅ Added 👍 reaction to response');
+      
+      // Small delay between reactions
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Add thumbs down reaction
+      await app.client.reactions.add({
+        token: process.env.SLACK_BOT_TOKEN,
+        channel: question.channel,
+        timestamp: result.ts,
+        name: '-1' // Slack's standard thumbs down emoji name
+      });
+      console.log('✅ Added 👎 reaction to response');
+    } catch (reactionError) {
+      console.error('⚠️ Error adding reactions:', reactionError.message);
+      console.error('   Error code:', reactionError.code);
+      console.error('   This might mean the bot needs to be invited to the channel');
+      // Don't fail the whole operation if reactions fail
+    }
+  } catch (error) {
+    console.error('Error posting response:', error);
+  }
+});
+
+// Debug: Log ALL events to see what we're receiving (this runs first, then specific handlers)
+app.event(/.*/, async ({ event, logger, next }) => {
+  if (event && event.type) {
+    console.log(`📨📨📨 EVENT RECEIVED: ${event.type} 📨📨📨`);
+    if (event.type === 'reaction_added' || event.type === 'reaction_removed') {
+      console.log(`🔔🔔🔔 REACTION EVENT DETECTED: ${event.type} 🔔🔔🔔`);
+      console.log('Full event object:', JSON.stringify(event, null, 2));
+    }
+  } else {
+    console.log('📨 Event received but no type:', JSON.stringify(event, null, 2));
+  }
+  // Call next() to allow other handlers to process the event
+  await next();
+});
+
+// Handle reaction added (for voting)
+app.event('reaction_added', async ({ event, client, logger }) => {
+  logger.info('🔔 Reaction added event handler triggered');
+  console.log('🔔 Reaction added event received');
+  console.log('Event details:', {
+    reaction: event.reaction,
+    user: event.user,
+    item_type: event.item?.type,
+    item_ts: event.item?.ts,
+    item_channel: event.item?.channel,
+    event_ts: event.event_ts
   });
+  
+  // Only process reactions on messages
+  if (!event.item || event.item.type !== 'message' || !event.item.ts || !event.item.channel) {
+    console.log('⚠️ Invalid reaction event - not a message reaction or missing data');
+    return;
+  }
+
+  const reactionTs = event.item.ts;
+  const reactionChannel = event.item.channel;
+
+  // Find the response this reaction is on - match both timestamp and channel
+  let responseId = null;
+  for (const [id, response] of responseStore.entries()) {
+    const question = questionStore.get(response.questionId);
+    if (question && 
+        response.ts === reactionTs && 
+        question.channel === reactionChannel) {
+      responseId = id;
+      console.log(`✅ Found matching response: ${responseId}`);
+      break;
+    }
+  }
+
+  if (!responseId) {
+    console.log('⚠️ Reaction not on a tracked response message');
+    console.log(`Looking for ts: ${reactionTs}, channel: ${reactionChannel}`);
+    console.log('Tracked responses:', Array.from(responseStore.keys()));
+    return;
+  }
+
+  const response = responseStore.get(responseId);
+  const reaction = event.reaction;
+  console.log(`📊 Processing reaction "${reaction}" on response ${responseId} by user ${event.user}`);
+
+  // Handle thumbs up (upvote) - check multiple possible reaction names
+  if (reaction === '+1' || reaction === 'thumbsup' || reaction === 'thumbsup_all' || reaction === '👍' || reaction === 'thumbs_up') {
+    console.log('✅ Thumbs up detected - adding upvote');
+    response.upvotes.add(event.user);
+    // Remove from downvotes if present
+    response.downvotes.delete(event.user);
+    console.log(`📈 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
+    await updateResponseMessage(responseId);
+  }
+  // Handle thumbs down (downvote) - check multiple possible reaction names
+  else if (reaction === '-1' || reaction === 'thumbsdown' || reaction === 'thumbsdown_all' || reaction === '👎' || reaction === 'thumbs_down') {
+    console.log('✅ Thumbs down detected - adding downvote');
+    response.downvotes.add(event.user);
+    // Remove from upvotes if present
+    response.upvotes.delete(event.user);
+    console.log(`📉 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
+    await updateResponseMessage(responseId);
+  } else {
+    console.log(`ℹ️ Ignoring reaction: ${reaction} (not thumbs up/down)`);
+  }
 });
 
-app.get('/api/stats', (req, res) => {
-  const stats = {
-    total: notifications.length,
-    bySource: {},
-    byType: {},
-    lastFetch: lastFetchTime,
-    errors: fetchErrors
-  };
-
-  notifications.forEach(n => {
-    stats.bySource[n.source] = (stats.bySource[n.source] || 0) + 1;
-    stats.byType[n.type] = (stats.byType[n.type] || 0) + 1;
+// Handle reaction removed (for unvoting)
+app.event('reaction_removed', async ({ event, client }) => {
+  console.log('🔔 Reaction removed event received');
+  console.log('Event details:', {
+    reaction: event.reaction,
+    user: event.user,
+    item_ts: event.item?.ts,
+    item_channel: event.item?.channel
   });
+  
+  if (!event.item || event.item.type !== 'message' || !event.item.ts || !event.item.channel) {
+    return;
+  }
 
-  res.json(stats);
+  const reactionTs = event.item.ts;
+  const reactionChannel = event.item.channel;
+
+  let responseId = null;
+  for (const [id, response] of responseStore.entries()) {
+    const question = questionStore.get(response.questionId);
+    if (question && 
+        response.ts === reactionTs && 
+        question.channel === reactionChannel) {
+      responseId = id;
+      break;
+    }
+  }
+
+  if (!responseId) {
+    return;
+  }
+
+  const response = responseStore.get(responseId);
+  const reaction = event.reaction;
+  console.log(`📊 Removing reaction "${reaction}" from response ${responseId}`);
+
+  if (reaction === '+1' || reaction === 'thumbsup' || reaction === 'thumbsup_all' || reaction === '👍' || reaction === 'thumbs_up') {
+    response.upvotes.delete(event.user);
+    console.log(`📈 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
+    await updateResponseMessage(responseId);
+  } else if (reaction === '-1' || reaction === 'thumbsdown' || reaction === 'thumbsdown_all' || reaction === '👎' || reaction === 'thumbs_down') {
+    response.downvotes.delete(event.user);
+    console.log(`📉 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
+    await updateResponseMessage(responseId);
+  }
 });
 
-// Serve the main page
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// Start the app
+(async () => {
+  try {
+    console.log('Starting Slack app...');
+    console.log('Bot Token:', process.env.SLACK_BOT_TOKEN ? 'Set' : 'Missing');
+    console.log('Signing Secret:', process.env.SLACK_SIGNING_SECRET ? 'Set' : 'Missing');
+    console.log('App Token:', process.env.SLACK_APP_TOKEN ? 'Set' : 'Missing');
+    
+    const port = process.env.PORT || 3000;
+    await app.start(port);
+    console.log(`⚡️ Slack app is running on port ${port}!`);
+    console.log('Waiting for connection to Slack...');
+  } catch (error) {
+    console.error('Failed to start app:', error);
+    process.exit(1);
+  }
+})();
+
+// Error handling
+app.error((error) => {
+  console.error('App error:', error);
 });
 
-// Initial fetch on startup
-fetchAllNotifications();
-
-// Schedule periodic fetches (every 5 minutes)
-cron.schedule('*/5 * * * *', () => {
-  fetchAllNotifications();
-});
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Unified Notifications App running on http://localhost:${PORT}`);
-  console.log(`📊 Fetching notifications every 5 minutes...`);
-});
+// Log connection status and verify event subscriptions
+(async () => {
+  try {
+    const authResult = await app.client.auth.test();
+    console.log('✅ App authenticated as:', authResult.user);
+    console.log('✅ Team:', authResult.team);
+    
+    // Wait a bit for Socket Mode to fully connect
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    console.log('');
+    console.log('🔍 EVENT SUBSCRIPTION CHECK:');
+    console.log('If you don\'t see events, verify in Slack app settings:');
+    console.log('  1. Event Subscriptions → Enable Events = ON');
+    console.log('  2. Subscribe to bot events: reaction_added, reaction_removed');
+    console.log('  3. OAuth & Permissions → Reinstall to Workspace');
+    console.log('  4. Restart this app after reinstalling');
+    console.log('');
+  } catch (error) {
+    console.error('❌ Auth test failed:', error.message);
+  }
+})();
