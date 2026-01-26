@@ -34,7 +34,7 @@ const app = new App({
 
 // Store for tracking responses and votes
 // In production, you'd want to use a database
-const questionStore = new Map(); // questionId -> { question, channel, ts, responses: [] }
+const questionStore = new Map(); // questionId -> { question, channel, ts, responses: [], userId, votingClosed: false }
 const responseStore = new Map(); // responseId -> { questionId, text, ts, upvotes: Set, downvotes: Set }
 
 // Generate unique IDs
@@ -139,23 +139,189 @@ app.command('/ask-question', async ({ command, ack, respond, client }) => {
               action_id: 'respond_to_question',
               value: questionId,
             },
+            {
+              type: 'button',
+              text: {
+                type: 'plain_text',
+                text: 'Close Voting',
+              },
+              action_id: 'close_voting',
+              value: questionId,
+              style: 'danger',
+            },
           ],
         },
       ],
     });
 
-    // Store question
+    // Store question with the user who posted it
     questionStore.set(questionId, {
       question: questionText,
       channel: command.channel_id,
       ts: result.ts,
       responses: [],
+      userId: command.user_id, // Store who posted the question
+      votingClosed: false,
     });
 
-    await respond('Question posted!');
+    // Send confirmation with reminder about inviting the bot
+    await respond({
+      text: 'Question posted!',
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '✅ *Question posted successfully!*\n\n💡 *Tip:* To enable automatic vote tallying, make sure the bot is invited to this channel. Type `/invite @Anonymous Q and A Bot` if you haven\'t already.',
+          },
+        },
+      ],
+    });
   } catch (error) {
     console.error('Error posting question:', error);
     await respond('Failed to post question. Please try again.');
+  }
+});
+
+// Handle close voting button click
+app.action('close_voting', async ({ ack, body, client }) => {
+  await ack();
+
+  const questionId = body.actions[0].value;
+  const question = questionStore.get(questionId);
+
+  if (!question) {
+    await client.chat.postEphemeral({
+      channel: body.channel.id,
+      user: body.user.id,
+      text: 'Question not found.',
+    });
+    return;
+  }
+
+  // Check if the user is the one who posted the question
+  if (question.userId !== body.user.id) {
+    await client.chat.postEphemeral({
+      channel: body.channel.id,
+      user: body.user.id,
+      text: 'Only the person who posted the question can close voting.',
+    });
+    return;
+  }
+
+  // Check if voting is already closed
+  if (question.votingClosed) {
+    await client.chat.postEphemeral({
+      channel: body.channel.id,
+      user: body.user.id,
+      text: 'Voting is already closed for this question.',
+    });
+    return;
+  }
+
+  // Mark voting as closed
+  question.votingClosed = true;
+
+  // Find the response with the most votes
+  let winningResponse = null;
+  let maxPoints = -Infinity;
+
+  for (const responseId of question.responses) {
+    const response = responseStore.get(responseId);
+    if (response) {
+      const points = calculatePoints(responseId);
+      if (points > maxPoints) {
+        maxPoints = points;
+        winningResponse = response;
+      }
+    }
+  }
+
+  // Update the original question message to show voting is closed
+  try {
+    await client.chat.update({
+      channel: question.channel,
+      ts: question.ts,
+      text: `*Question:* ${question.question}\n\n*Voting is now closed.*`,
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Question:* ${question.question}\n\n*Voting is now closed.*`,
+          },
+        },
+      ],
+    });
+  } catch (error) {
+    console.error('Error updating question message:', error);
+  }
+
+  // Post announcement of the winner
+  try {
+    if (winningResponse && maxPoints >= 0) {
+      await client.chat.postMessage({
+        channel: question.channel,
+        text: `🏆 *Voting Results*\n\n*Question:* ${question.question}\n\n*Winning Response:*\n${winningResponse.text}\n\n*Final Score: ${maxPoints > 0 ? '+' : ''}${maxPoints} points*`,
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `🏆 *Voting Results*\n\n*Question:* ${question.question}`,
+            },
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Winning Response:*\n${winningResponse.text}`,
+            },
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Final Score: ${maxPoints > 0 ? '+' : ''}${maxPoints} points*`,
+            },
+          },
+        ],
+      });
+      console.log(`✅ Voting closed for question ${questionId}. Winner announced with ${maxPoints} points.`);
+    } else if (question.responses.length === 0) {
+      await client.chat.postMessage({
+        channel: question.channel,
+        text: `📊 *Voting Results*\n\n*Question:* ${question.question}\n\n*No responses were submitted.*`,
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `📊 *Voting Results*\n\n*Question:* ${question.question}\n\n*No responses were submitted.*`,
+            },
+          },
+        ],
+      });
+      console.log(`✅ Voting closed for question ${questionId}. No responses.`);
+    } else {
+      // All responses have negative or zero points
+      await client.chat.postMessage({
+        channel: question.channel,
+        text: `📊 *Voting Results*\n\n*Question:* ${question.question}\n\n*No response received positive votes.*`,
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `📊 *Voting Results*\n\n*Question:* ${question.question}\n\n*No response received positive votes.*`,
+            },
+          },
+        ],
+      });
+      console.log(`✅ Voting closed for question ${questionId}. No positive votes.`);
+    }
+  } catch (error) {
+    console.error('Error posting voting results:', error);
   }
 });
 
@@ -171,6 +337,16 @@ app.action('respond_to_question', async ({ ack, body, client }) => {
       channel: body.channel.id,
       user: body.user.id,
       text: 'Question not found.',
+    });
+    return;
+  }
+
+  // Check if voting is closed
+  if (question.votingClosed) {
+    await client.chat.postEphemeral({
+      channel: body.channel.id,
+      user: body.user.id,
+      text: 'Voting is closed for this question. No new responses can be submitted.',
     });
     return;
   }

@@ -1,12 +1,12 @@
 {
   "display_information": {
-    "name": "Question & Response App",
-    "description": "Post questions and collect anonymous responses with voting",
+    "name": "Anonymous Q and A Bot",
+    "description": "Anonymous Q and A Bot - Post questions and collect anonymous responses with voting",
     "background_color": "#2c2d30"
   },
   "features": {
     "bot_user": {
-      "display_name": "Question Bot",
+      "display_name": "Anonymous Q and A Bot",
       "always_online": true
     },
     "slash_commands": [
