@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unified Notifications Feed</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .header p {
+            color: #666;
+            margin-bottom: 20px;
+        }
+
+        .stats {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            flex: 1;
+            min-width: 150px;
+        }
+
+        .stat-card h3 {
+            font-size: 0.9em;
+            opacity: 0.9;
+            margin-bottom: 5px;
+        }
+
+        .stat-card .value {
+            font-size: 1.8em;
+            font-weight: bold;
+        }
+
+        .filters {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .filters select, .filters button {
+            padding: 10px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .filters select:hover, .filters button:hover {
+            border-color: #667eea;
+        }
+
+        .filters button {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .filters button:hover {
+            background: #5568d3;
+        }
+
+        .notifications {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .notification-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+            border-left: 4px solid;
+        }
+
+        .notification-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .notification-card.twitter {
+            border-left-color: #1DA1F2;
+        }
+
+        .notification-card.reddit {
+            border-left-color: #FF4500;
+        }
+
+        .notification-card.instagram {
+            border-left-color: #E4405F;
+        }
+
+        .notification-card.chess {
+            border-left-color: #7FA650;
+        }
+
+        .notification-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .notification-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .notification-avatar img {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            object-fit: cover;
+        }
+
+        .notification-meta {
+            flex: 1;
+        }
+
+        .notification-title {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 4px;
+        }
+
+        .notification-source {
+            font-size: 0.85em;
+            color: #999;
+        }
+
+        .notification-time {
+            font-size: 0.85em;
+            color: #999;
+            margin-left: auto;
+        }
+
+        .notification-content {
+            color: #555;
+            line-height: 1.6;
+            margin-bottom: 12px;
+        }
+
+        .notification-footer {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            font-size: 0.85em;
+            color: #999;
+        }
+
+        .notification-link {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .notification-link:hover {
+            text-decoration: underline;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: white;
+            font-size: 1.2em;
+        }
+
+        .empty {
+            text-align: center;
+            padding: 60px;
+            background: white;
+            border-radius: 12px;
+            color: #999;
+        }
+
+        .refresh-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: white;
+            padding: 10px 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            font-size: 0.85em;
+            color: #666;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #e0e0e0;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="refresh-indicator" id="refreshIndicator">
+        <span id="lastFetch">Loading...</span>
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <h1>🔔 Unified Notifications Feed</h1>
+            <p>All your social media and Chess.com notifications in one place</p>
+            <div class="stats" id="stats">
+                <div class="stat-card">
+                    <h3>Total Notifications</h3>
+                    <div class="value" id="totalCount">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Twitter</h3>
+                    <div class="value" id="twitterCount">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Reddit</h3>
+                    <div class="value" id="redditCount">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Instagram</h3>
+                    <div class="value" id="instagramCount">0</div>
+                </div>
+                <div class="stat-card">
+                    <h3>Chess.com</h3>
+                    <div class="value" id="chessCount">0</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="filters">
+            <select id="sourceFilter">
+                <option value="">All Sources</option>
+                <option value="Twitter">Twitter</option>
+                <option value="Reddit">Reddit</option>
+                <option value="Instagram">Instagram</option>
+                <option value="Chess.com">Chess.com</option>
+            </select>
+            <select id="typeFilter">
+                <option value="">All Types</option>
+                <option value="mention">Mentions</option>
+                <option value="reply">Replies</option>
+                <option value="comment">Comments</option>
+                <option value="likes">Likes</option>
+            </select>
+            <button onclick="loadNotifications()">🔄 Refresh</button>
+        </div>
+
+        <div class="notifications" id="notifications">
+            <div class="loading">
+                <div class="spinner"></div>
+                Loading notifications...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allNotifications = [];
+        let currentFilters = { source: '', type: '' };
+
+        function formatTime(timestamp) {
+            const date = new Date(timestamp);
+            const now = new Date();
+            const diff = now - date;
+            const minutes = Math.floor(diff / 60000);
+            const hours = Math.floor(diff / 3600000);
+            const days = Math.floor(diff / 86400000);
+
+            if (minutes < 1) return 'Just now';
+            if (minutes < 60) return `${minutes}m ago`;
+            if (hours < 24) return `${hours}h ago`;
+            if (days < 7) return `${days}d ago`;
+            return date.toLocaleDateString();
+        }
+
+        function getSourceClass(source) {
+            const sourceMap = {
+                'Twitter': 'twitter',
+                'Reddit': 'reddit',
+                'Instagram': 'instagram',
+                'Chess.com': 'chess'
+            };
+            return sourceMap[source] || '';
+        }
+
+        function renderNotifications(notifications) {
+            const container = document.getElementById('notifications');
+            
+            if (notifications.length === 0) {
+                container.innerHTML = '<div class="empty">No notifications found. Try adjusting your filters.</div>';
+                return;
+            }
+
+            container.innerHTML = notifications.map(notif => `
+                <div class="notification-card ${getSourceClass(notif.source)}">
+                    <div class="notification-header">
+                        <div class="notification-avatar">
+                            ${notif.authorAvatar 
+                                ? `<img src="${notif.authorAvatar}" alt="${notif.authorName}">` 
+                                : notif.authorName.charAt(0).toUpperCase()}
+                        </div>
+                        <div class="notification-meta">
+                            <div class="notification-title">${notif.title}</div>
+                            <div class="notification-source">${notif.source}${notif.account ? ` • @${notif.account}` : ''}</div>
+                        </div>
+                        <div class="notification-time">${formatTime(notif.timestamp)}</div>
+                    </div>
+                    ${notif.content ? `<div class="notification-content">${notif.content}</div>` : ''}
+                    <div class="notification-footer">
+                        ${notif.url ? `<a href="${notif.url}" target="_blank" class="notification-link">View →</a>` : ''}
+                        ${notif.metrics ? `<span>❤️ ${notif.metrics.like_count || 0} • 💬 ${notif.metrics.reply_count || 0}</span>` : ''}
+                        ${notif.score !== undefined ? `<span>⬆️ ${notif.score}</span>` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateStats(stats) {
+            document.getElementById('totalCount').textContent = stats.total || 0;
+            document.getElementById('twitterCount').textContent = stats.bySource?.Twitter || 0;
+            document.getElementById('redditCount').textContent = stats.bySource?.Reddit || 0;
+            document.getElementById('instagramCount').textContent = stats.bySource?.Instagram || 0;
+            document.getElementById('chessCount').textContent = stats.bySource?.['Chess.com'] || 0;
+
+            if (stats.lastFetch) {
+                const lastFetch = new Date(stats.lastFetch);
+                document.getElementById('lastFetch').textContent = `Last updated: ${formatTime(lastFetch)}`;
+            }
+        }
+
+        function applyFilters() {
+            const source = document.getElementById('sourceFilter').value;
+            const type = document.getElementById('typeFilter').value;
+            
+            currentFilters = { source, type };
+            
+            let filtered = allNotifications;
+            
+            if (source) {
+                filtered = filtered.filter(n => n.source === source);
+            }
+            
+            if (type) {
+                filtered = filtered.filter(n => n.type === type);
+            }
+            
+            renderNotifications(filtered);
+        }
+
+        async function loadNotifications() {
+            try {
+                const source = document.getElementById('sourceFilter').value;
+                const type = document.getElementById('typeFilter').value;
+                
+                const params = new URLSearchParams();
+                if (source) params.append('source', source);
+                if (type) params.append('type', type);
+                
+                const [notificationsRes, statsRes] = await Promise.all([
+                    fetch(`/api/notifications?${params.toString()}`),
+                    fetch('/api/stats')
+                ]);
+                
+                const notificationsData = await notificationsRes.json();
+                const statsData = await statsRes.json();
+                
+                allNotifications = notificationsData.notifications || [];
+                renderNotifications(allNotifications);
+                updateStats(statsData);
+            } catch (error) {
+                console.error('Error loading notifications:', error);
+                document.getElementById('notifications').innerHTML = 
+                    '<div class="empty">Error loading notifications. Please try again.</div>';
+            }
+        }
+
+        // Set up event listeners
+        document.getElementById('sourceFilter').addEventListener('change', applyFilters);
+        document.getElementById('typeFilter').addEventListener('change', applyFilters);
+
+        // Initial load
+        loadNotifications();
+
+        // Auto-refresh every 5 minutes
+        setInterval(loadNotifications, 5 * 60 * 1000);
+    </script>
+</body>
+</html>
