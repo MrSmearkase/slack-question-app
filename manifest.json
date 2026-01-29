@@ -19,6 +19,9 @@
     ]
   },
   "oauth_config": {
+    "redirect_urls": [
+      "https://slack.com/oauth/v2/authorize"
+    ],
     "scopes": {
       "bot": [
         "chat:write",

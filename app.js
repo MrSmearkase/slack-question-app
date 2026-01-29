@@ -24,18 +24,66 @@ console.error = function(...args) {
   originalError.apply(console, args);
 };
 
-// Initialize the Slack app
+// Get and trim environment variables
+const signingSecret = process.env.SLACK_SIGNING_SECRET?.trim();
+const appToken = process.env.SLACK_APP_TOKEN?.trim();
+
+// Store workspace-specific bot tokens
+// In production, use a database instead
+const workspaceTokens = new Map(); // teamId -> botToken
+
+// Store for tracking responses and votes per workspace
+// In production, you'd want to use a database
+const questionStore = new Map(); // questionId -> { question, channel, ts, responses: [], userId, votingClosed: false, teamId }
+const responseStore = new Map(); // responseId -> { questionId, text, ts, upvotes: Set, downvotes: Set }
+
+// Initialize the Slack app without a default token (will use workspace-specific tokens)
 const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  signingSecret: signingSecret,
   socketMode: true,
-  appToken: process.env.SLACK_APP_TOKEN,
+  appToken: appToken,
+  // Don't set a default token - we'll use workspace-specific tokens
+  authorize: async ({ teamId, enterpriseId }) => {
+    const token = workspaceTokens.get(teamId);
+    if (!token) {
+      console.error(`❌ No token found for workspace ${teamId}`);
+      throw new Error(`No token found for workspace ${teamId}. Please install the app to this workspace.`);
+    }
+    return {
+      botToken: token,
+      botId: undefined, // Will be fetched automatically
+      botUserId: undefined, // Will be fetched automatically
+    };
+  },
 });
 
-// Store for tracking responses and votes
-// In production, you'd want to use a database
-const questionStore = new Map(); // questionId -> { question, channel, ts, responses: [], userId, votingClosed: false }
-const responseStore = new Map(); // responseId -> { questionId, text, ts, upvotes: Set, downvotes: Set }
+// Helper function to get workspace-specific client
+function getWorkspaceClient(teamId) {
+  const token = workspaceTokens.get(teamId);
+  if (!token) {
+    throw new Error(`No token found for workspace ${teamId}`);
+  }
+  return new app.client.constructor({ token });
+}
+
+// Helper to store workspace token when first encountered
+function storeWorkspaceToken(teamId, token) {
+  if (teamId && token && !workspaceTokens.has(teamId)) {
+    workspaceTokens.set(teamId, token);
+    console.log(`✅ Stored token for workspace ${teamId}`);
+    return true;
+  }
+  return false;
+}
+
+// Load initial workspace token from environment (for backward compatibility)
+if (process.env.SLACK_BOT_TOKEN) {
+  // If a token is provided via env, we need to determine the workspace
+  // For now, we'll store it with a placeholder and update it when we get the first event
+  const initialToken = process.env.SLACK_BOT_TOKEN.trim();
+  console.log('⚠️ Initial token provided via environment. Will be associated with first workspace that connects.');
+  // We'll store this when we get the first team_id from an event
+}
 
 // Generate unique IDs
 function generateId() {
@@ -50,7 +98,7 @@ function calculatePoints(responseId) {
 }
 
 // Update response message with point total
-async function updateResponseMessage(responseId) {
+async function updateResponseMessage(responseId, teamId) {
   const response = responseStore.get(responseId);
   if (!response) {
     console.log('⚠️ Response not found for ID:', responseId);
@@ -70,7 +118,8 @@ async function updateResponseMessage(responseId) {
   console.log(`   Channel: ${question.channel}, Timestamp: ${response.ts}`);
   
   try {
-    const result = await app.client.chat.update({
+    const client = getWorkspaceClient(teamId);
+    const result = await client.chat.update({
       channel: question.channel,
       ts: response.ts,
       text: `${response.text}\n\n*Points: ${pointsText}*`,
@@ -100,6 +149,24 @@ async function updateResponseMessage(responseId) {
 // Command to post a question
 app.command('/ask-question', async ({ command, ack, respond, client }) => {
   console.log('✅ Command received:', JSON.stringify(command, null, 2));
+  
+  const teamId = command.team_id;
+  
+  // Ensure workspace token is stored
+  if (!workspaceTokens.has(teamId)) {
+    // Try to use the client's token if available
+    if (client.token) {
+      storeWorkspaceToken(teamId, client.token);
+    } else if (initialToken) {
+      // Use initial token from environment for first workspace
+      storeWorkspaceToken(teamId, initialToken);
+      initialToken = null; // Clear it so it's only used once
+    } else {
+      await respond('❌ This workspace is not properly configured. Please reinstall the app.');
+      return;
+    }
+  }
+  
   try {
     await ack();
     console.log('✅ Command acknowledged');
@@ -154,14 +221,15 @@ app.command('/ask-question', async ({ command, ack, respond, client }) => {
       ],
     });
 
-    // Store question with the user who posted it
+    // Store question with workspace ID
     questionStore.set(questionId, {
       question: questionText,
       channel: command.channel_id,
       ts: result.ts,
       responses: [],
-      userId: command.user_id, // Store who posted the question
+      userId: command.user_id,
       votingClosed: false,
+      teamId: teamId, // Store workspace ID
     });
 
     // Send confirmation with reminder about inviting the bot
@@ -189,6 +257,7 @@ app.action('close_voting', async ({ ack, body, client }) => {
 
   const questionId = body.actions[0].value;
   const question = questionStore.get(questionId);
+  const teamId = body.team?.id || body.user?.team_id;
 
   if (!question) {
     await client.chat.postEphemeral({
@@ -331,6 +400,7 @@ app.action('respond_to_question', async ({ ack, body, client }) => {
 
   const questionId = body.actions[0].value;
   const question = questionStore.get(questionId);
+  const teamId = body.team?.id || body.user?.team_id;
 
   if (!question) {
     await client.chat.postEphemeral({
@@ -411,6 +481,7 @@ app.view('response_modal', async ({ ack, body, view, client }) => {
   const questionId = view.private_metadata;
   const question = questionStore.get(questionId);
   const responseText = view.state.values.response_input.response_text.value.trim();
+  const teamId = body.team?.id || body.user?.team_id;
 
   if (!responseText) {
     return;
@@ -423,7 +494,6 @@ app.view('response_modal', async ({ ack, body, view, client }) => {
   try {
     // Post anonymous response in thread
     const result = await client.chat.postMessage({
-      token: process.env.SLACK_BOT_TOKEN,
       channel: question.channel,
       thread_ts: question.ts,
       text: `${responseText}\n\n*Points: 0*`,
@@ -444,12 +514,12 @@ app.view('response_modal', async ({ ack, body, view, client }) => {
     console.log(`   Response ID: ${responseId}`);
     console.log(`   Timestamp: ${result.ts}`);
     console.log(`   Channel: ${question.channel}`);
+    console.log(`   Workspace: ${teamId}`);
 
     // Automatically add thumbs up and thumbs down reactions to the response
     try {
       // Add thumbs up reaction - use the token explicitly
-      await app.client.reactions.add({
-        token: process.env.SLACK_BOT_TOKEN,
+      await client.reactions.add({
         channel: question.channel,
         timestamp: result.ts,
         name: '+1' // Slack's standard thumbs up emoji name
@@ -460,8 +530,7 @@ app.view('response_modal', async ({ ack, body, view, client }) => {
       await new Promise(resolve => setTimeout(resolve, 500));
       
       // Add thumbs down reaction
-      await app.client.reactions.add({
-        token: process.env.SLACK_BOT_TOKEN,
+      await client.reactions.add({
         channel: question.channel,
         timestamp: result.ts,
         name: '-1' // Slack's standard thumbs down emoji name
@@ -494,8 +563,19 @@ app.event(/.*/, async ({ event, logger, next }) => {
 });
 
 // Handle reaction added (for voting)
-app.event('reaction_added', async ({ event, client, logger }) => {
-  logger.info('🔔 Reaction added event handler triggered');
+app.event('reaction_added', async ({ event, client }) => {
+  const teamId = event.team;
+  
+  // Ensure workspace token is stored
+  if (teamId && !workspaceTokens.has(teamId)) {
+    if (client.token) {
+      storeWorkspaceToken(teamId, client.token);
+    } else if (initialToken) {
+      storeWorkspaceToken(teamId, initialToken);
+      initialToken = null;
+    }
+  }
+  
   console.log('🔔 Reaction added event received');
   console.log('Event details:', {
     reaction: event.reaction,
@@ -503,7 +583,8 @@ app.event('reaction_added', async ({ event, client, logger }) => {
     item_type: event.item?.type,
     item_ts: event.item?.ts,
     item_channel: event.item?.channel,
-    event_ts: event.event_ts
+    event_ts: event.event_ts,
+    team: event.team
   });
   
   // Only process reactions on messages
@@ -521,7 +602,8 @@ app.event('reaction_added', async ({ event, client, logger }) => {
     const question = questionStore.get(response.questionId);
     if (question && 
         response.ts === reactionTs && 
-        question.channel === reactionChannel) {
+        question.channel === reactionChannel &&
+        question.teamId === teamId) { // Also match workspace
       responseId = id;
       console.log(`✅ Found matching response: ${responseId}`);
       break;
@@ -530,7 +612,7 @@ app.event('reaction_added', async ({ event, client, logger }) => {
 
   if (!responseId) {
     console.log('⚠️ Reaction not on a tracked response message');
-    console.log(`Looking for ts: ${reactionTs}, channel: ${reactionChannel}`);
+    console.log(`Looking for ts: ${reactionTs}, channel: ${reactionChannel}, team: ${teamId}`);
     console.log('Tracked responses:', Array.from(responseStore.keys()));
     return;
   }
@@ -546,7 +628,7 @@ app.event('reaction_added', async ({ event, client, logger }) => {
     // Remove from downvotes if present
     response.downvotes.delete(event.user);
     console.log(`📈 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
-    await updateResponseMessage(responseId);
+    await updateResponseMessage(responseId, teamId);
   }
   // Handle thumbs down (downvote) - check multiple possible reaction names
   else if (reaction === '-1' || reaction === 'thumbsdown' || reaction === 'thumbsdown_all' || reaction === '👎' || reaction === 'thumbs_down') {
@@ -555,7 +637,7 @@ app.event('reaction_added', async ({ event, client, logger }) => {
     // Remove from upvotes if present
     response.upvotes.delete(event.user);
     console.log(`📉 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
-    await updateResponseMessage(responseId);
+    await updateResponseMessage(responseId, teamId);
   } else {
     console.log(`ℹ️ Ignoring reaction: ${reaction} (not thumbs up/down)`);
   }
@@ -563,12 +645,15 @@ app.event('reaction_added', async ({ event, client, logger }) => {
 
 // Handle reaction removed (for unvoting)
 app.event('reaction_removed', async ({ event, client }) => {
+  const teamId = event.team;
+  
   console.log('🔔 Reaction removed event received');
   console.log('Event details:', {
     reaction: event.reaction,
     user: event.user,
     item_ts: event.item?.ts,
-    item_channel: event.item?.channel
+    item_channel: event.item?.channel,
+    team: event.team
   });
   
   if (!event.item || event.item.type !== 'message' || !event.item.ts || !event.item.channel) {
@@ -583,7 +668,8 @@ app.event('reaction_removed', async ({ event, client }) => {
     const question = questionStore.get(response.questionId);
     if (question && 
         response.ts === reactionTs && 
-        question.channel === reactionChannel) {
+        question.channel === reactionChannel &&
+        question.teamId === teamId) { // Also match workspace
       responseId = id;
       break;
     }
@@ -600,28 +686,62 @@ app.event('reaction_removed', async ({ event, client }) => {
   if (reaction === '+1' || reaction === 'thumbsup' || reaction === 'thumbsup_all' || reaction === '👍' || reaction === 'thumbs_up') {
     response.upvotes.delete(event.user);
     console.log(`📈 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
-    await updateResponseMessage(responseId);
+    await updateResponseMessage(responseId, teamId);
   } else if (reaction === '-1' || reaction === 'thumbsdown' || reaction === 'thumbsdown_all' || reaction === '👎' || reaction === 'thumbs_down') {
     response.downvotes.delete(event.user);
     console.log(`📉 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
-    await updateResponseMessage(responseId);
+    await updateResponseMessage(responseId, teamId);
   }
 });
 
 // Start the app
 (async () => {
   try {
-    console.log('Starting Slack app...');
-    console.log('Bot Token:', process.env.SLACK_BOT_TOKEN ? 'Set' : 'Missing');
-    console.log('Signing Secret:', process.env.SLACK_SIGNING_SECRET ? 'Set' : 'Missing');
-    console.log('App Token:', process.env.SLACK_APP_TOKEN ? 'Set' : 'Missing');
+    console.log('Starting Slack app with multi-workspace support...');
+    
+    // Validate environment variables
+    console.log('Signing Secret:', signingSecret ? `Set (${signingSecret.substring(0, 10)}...)` : '❌ MISSING');
+    console.log('App Token:', appToken ? `Set (${appToken.substring(0, 10)}...)` : '❌ MISSING');
+    
+    if (!signingSecret || !appToken) {
+      console.error('❌ ERROR: Missing required environment variables!');
+      console.error('Please set the following in Railway Variables:');
+      console.error('  - SLACK_SIGNING_SECRET');
+      console.error('  - SLACK_APP_TOKEN');
+      console.error('Note: SLACK_BOT_TOKEN is no longer required - tokens are stored per workspace');
+      process.exit(1);
+    }
+    
+    // Verify token formats
+    if (!appToken.startsWith('xapp-')) {
+      console.error('❌ ERROR: SLACK_APP_TOKEN should start with "xapp-"');
+      process.exit(1);
+    }
+    
+    // Load initial token from env if provided (for backward compatibility)
+    if (process.env.SLACK_BOT_TOKEN) {
+      const initialToken = process.env.SLACK_BOT_TOKEN.trim();
+      console.log('⚠️ SLACK_BOT_TOKEN provided in environment.');
+      console.log('   This will be used for the first workspace that connects.');
+      console.log('   For multi-workspace support, install the app via OAuth to each workspace.');
+    }
     
     const port = process.env.PORT || 3000;
     await app.start(port);
     console.log(`⚡️ Slack app is running on port ${port}!`);
-    console.log('Waiting for connection to Slack...');
+    console.log('Waiting for workspace connections...');
+    console.log('');
+    console.log('📋 Multi-workspace support enabled:');
+    console.log('   - Install the app to each workspace via OAuth');
+    console.log('   - Each workspace will have its own bot token');
+    console.log('   - Questions and responses are tracked per workspace');
   } catch (error) {
     console.error('Failed to start app:', error);
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      data: error.data
+    });
     process.exit(1);
   }
 })();
@@ -634,10 +754,6 @@ app.error((error) => {
 // Log connection status and verify event subscriptions
 (async () => {
   try {
-    const authResult = await app.client.auth.test();
-    console.log('✅ App authenticated as:', authResult.user);
-    console.log('✅ Team:', authResult.team);
-    
     // Wait a bit for Socket Mode to fully connect
     await new Promise(resolve => setTimeout(resolve, 2000));
     
@@ -646,10 +762,11 @@ app.error((error) => {
     console.log('If you don\'t see events, verify in Slack app settings:');
     console.log('  1. Event Subscriptions → Enable Events = ON');
     console.log('  2. Subscribe to bot events: reaction_added, reaction_removed');
-    console.log('  3. OAuth & Permissions → Reinstall to Workspace');
-    console.log('  4. Restart this app after reinstalling');
+    console.log('  3. OAuth & Permissions → Install to Workspace (for each workspace)');
+    console.log('  4. Restart this app after installing to new workspaces');
     console.log('');
+    console.log(`📊 Currently tracking ${workspaceTokens.size} workspace(s)`);
   } catch (error) {
-    console.error('❌ Auth test failed:', error.message);
+    console.error('❌ Error during startup check:', error.message);
   }
 })();
