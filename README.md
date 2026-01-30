@@ -148,12 +148,25 @@ See `MULTI_WORKSPACE_SETUP.md` for detailed instructions.
 
 See `RAILWAY_SETUP.md` for instructions on deploying to Railway or other cloud platforms.
 
+## Database Setup
+
+The app now supports PostgreSQL for persistent data storage! All data (questions, responses, votes, and workspace tokens) is stored in the database with encryption for sensitive tokens.
+
+See `DATABASE_SETUP.md` for detailed database setup instructions.
+
+**Quick Start:**
+1. Add PostgreSQL service in Railway
+2. Set `DATABASE_URL` (automatically set by Railway)
+3. Set `ENCRYPTION_KEY` (generate a random 32-byte hex string)
+4. Deploy - tables are created automatically!
+
 ## Notes
 
-- Responses are stored in memory. For production use, consider using a database (e.g., PostgreSQL, MongoDB)
-- The app uses Socket Mode, so it doesn't require a public URL
-- All responses are posted anonymously - the original responder is not identified
-- Workspace tokens are stored in memory. For production, use a database to persist them
+- **Database Storage**: All data is stored in PostgreSQL (if `DATABASE_URL` is set)
+- **Fallback Mode**: If no database, app uses in-memory storage (data lost on restart)
+- **Encryption**: Workspace tokens are encrypted before storage
+- **Socket Mode**: The app uses Socket Mode, so it doesn't require a public URL
+- **Anonymous Responses**: All responses are posted anonymously - the original responder is not identified
 
 ## Troubleshooting
 

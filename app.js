@@ -1,6 +1,7 @@
 const { App } = require('@slack/bolt');
 const fs = require('fs');
 const path = require('path');
+const db = require('./db');
 require('dotenv').config();
 
 // Set up file logging
@@ -34,14 +35,9 @@ if (process.env.SLACK_BOT_TOKEN) {
   initialToken = process.env.SLACK_BOT_TOKEN.trim();
 }
 
-// Store workspace-specific bot tokens
-// In production, use a database instead
-const workspaceTokens = new Map(); // teamId -> botToken
-
-// Store for tracking responses and votes per workspace
-// In production, you'd want to use a database
-const questionStore = new Map(); // questionId -> { question, channel, ts, responses: [], userId, votingClosed: false, teamId }
-const responseStore = new Map(); // responseId -> { questionId, text, ts, upvotes: Set, downvotes: Set }
+// Workspace tokens are now stored in database (encrypted)
+// Cache for quick access (loaded from database on startup)
+const workspaceTokens = new Map(); // teamId -> botToken (cached from database)
 
 // Initialize the Slack app without a default token (will use workspace-specific tokens)
 const app = new App({
@@ -50,20 +46,24 @@ const app = new App({
   appToken: appToken,
   // Don't set a default token - we'll use workspace-specific tokens
   authorize: async ({ teamId, enterpriseId }) => {
+    // First check cache
     let token = workspaceTokens.get(teamId);
+    
+    // If not in cache, try database
+    if (!token) {
+      token = await db.getWorkspaceToken(teamId);
+      if (token) {
+        workspaceTokens.set(teamId, token); // Cache it
+        console.log(`✅ Loaded token for workspace ${teamId} from database`);
+      }
+    }
     
     // If no token found, try to use initial token from env (for first workspace)
     if (!token && initialToken) {
       token = initialToken;
+      await db.setWorkspaceToken(teamId, token);
       workspaceTokens.set(teamId, token);
-      console.log(`✅ Using initial token for workspace ${teamId}`);
-    }
-    
-    // If still no token, use initialToken as fallback (for backward compatibility)
-    // This allows the first workspace to work without explicit installation
-    if (!token && initialToken) {
-      token = initialToken;
-      console.log(`⚠️ Using fallback initial token for workspace ${teamId}`);
+      console.log(`✅ Using initial token for workspace ${teamId} and storing in database`);
     }
     
     // If we have a token, return it
@@ -92,10 +92,13 @@ function getWorkspaceClient(teamId) {
 }
 
 // Helper to store workspace token when first encountered
-function storeWorkspaceToken(teamId, token) {
-  if (teamId && token && !workspaceTokens.has(teamId)) {
+async function storeWorkspaceToken(teamId, token) {
+  if (teamId && token) {
+    // Store in database (encrypted)
+    await db.setWorkspaceToken(teamId, token);
+    // Also cache in memory
     workspaceTokens.set(teamId, token);
-    console.log(`✅ Stored token for workspace ${teamId}`);
+    console.log(`✅ Stored token (encrypted) for workspace ${teamId}`);
     return true;
   }
   return false;
@@ -116,27 +119,26 @@ function generateId() {
 }
 
 // Calculate points for a response
-function calculatePoints(responseId) {
-  const response = responseStore.get(responseId);
-  if (!response) return 0;
-  return response.upvotes.size - response.downvotes.size;
+async function calculatePoints(responseId) {
+  const votes = await db.getResponseVotes(responseId);
+  return votes.upvotes.length - votes.downvotes.length;
 }
 
 // Update response message with point total
 async function updateResponseMessage(responseId, teamId) {
-  const response = responseStore.get(responseId);
+  const response = await db.getResponse(responseId);
   if (!response) {
     console.log('⚠️ Response not found for ID:', responseId);
     return;
   }
 
-  const question = questionStore.get(response.questionId);
+  const question = await db.getQuestion(response.questionId);
   if (!question) {
     console.log('⚠️ Question not found for response:', responseId);
     return;
   }
 
-  const points = calculatePoints(responseId);
+  const points = await calculatePoints(responseId);
   const pointsText = points > 0 ? `+${points}` : points.toString();
   
   console.log(`🔄 Updating response ${responseId} with points: ${pointsText}`);
@@ -179,12 +181,16 @@ app.command('/ask-question', async ({ command, ack, respond, client }) => {
   
   // Ensure workspace token is stored
   if (!workspaceTokens.has(teamId)) {
-    // Try to use the client's token if available
-    if (client.token) {
-      storeWorkspaceToken(teamId, client.token);
+    // Try database first
+    const dbToken = await db.getWorkspaceToken(teamId);
+    if (dbToken) {
+      workspaceTokens.set(teamId, dbToken);
+    } else if (client.token) {
+      // Try to use the client's token if available
+      await storeWorkspaceToken(teamId, client.token);
     } else if (initialToken) {
       // Use initial token from environment for first workspace
-      storeWorkspaceToken(teamId, initialToken);
+      await storeWorkspaceToken(teamId, initialToken);
       initialToken = null; // Clear it so it's only used once
     } else {
       await respond('❌ This workspace is not properly configured. Please reinstall the app.');
@@ -246,16 +252,15 @@ app.command('/ask-question', async ({ command, ack, respond, client }) => {
       ],
     });
 
-    // Store question with workspace ID
-    questionStore.set(questionId, {
-      question: questionText,
-      channel: command.channel_id,
-      ts: result.ts,
-      responses: [],
-      userId: command.user_id,
-      votingClosed: false,
-      teamId: teamId, // Store workspace ID
-    });
+    // Store question in database
+    await db.createQuestion(
+      questionId,
+      teamId,
+      questionText,
+      command.channel_id,
+      result.ts,
+      command.user_id
+    );
 
     // Send confirmation with reminder about inviting the bot
     await respond({
@@ -281,7 +286,7 @@ app.action('close_voting', async ({ ack, body, client }) => {
   await ack();
 
   const questionId = body.actions[0].value;
-  const question = questionStore.get(questionId);
+  const question = await db.getQuestion(questionId);
   const teamId = body.team?.id || body.user?.team_id;
 
   if (!question) {
@@ -313,17 +318,18 @@ app.action('close_voting', async ({ ack, body, client }) => {
     return;
   }
 
-  // Mark voting as closed
-  question.votingClosed = true;
+  // Mark voting as closed in database
+  await db.closeVoting(questionId);
 
   // Find the response with the most votes
   let winningResponse = null;
   let maxPoints = -Infinity;
 
-  for (const responseId of question.responses) {
-    const response = responseStore.get(responseId);
+  const responseIds = await db.getQuestionResponses(questionId);
+  for (const responseId of responseIds) {
+    const response = await db.getResponse(responseId);
     if (response) {
-      const points = calculatePoints(responseId);
+      const points = await calculatePoints(responseId);
       if (points > maxPoints) {
         maxPoints = points;
         winningResponse = response;
@@ -382,7 +388,9 @@ app.action('close_voting', async ({ ack, body, client }) => {
         ],
       });
       console.log(`✅ Voting closed for question ${questionId}. Winner announced with ${maxPoints} points.`);
-    } else if (question.responses.length === 0) {
+    } else {
+      const responseIds = await db.getQuestionResponses(questionId);
+      if (responseIds.length === 0) {
       await client.chat.postMessage({
         channel: question.channel,
         text: `📊 *Voting Results*\n\n*Question:* ${question.question}\n\n*No responses were submitted.*`,
@@ -424,7 +432,7 @@ app.action('respond_to_question', async ({ ack, body, client }) => {
   await ack();
 
   const questionId = body.actions[0].value;
-  const question = questionStore.get(questionId);
+  const question = await db.getQuestion(questionId);
   const teamId = body.team?.id || body.user?.team_id;
 
   if (!question) {
@@ -504,7 +512,7 @@ app.view('response_modal', async ({ ack, body, view, client }) => {
   await ack();
 
   const questionId = view.private_metadata;
-  const question = questionStore.get(questionId);
+  const question = await db.getQuestion(questionId);
   const responseText = view.state.values.response_input.response_text.value.trim();
   const teamId = body.team?.id || body.user?.team_id;
 
@@ -525,15 +533,8 @@ app.view('response_modal', async ({ ack, body, view, client }) => {
     });
 
     const responseId = generateId();
-    responseStore.set(responseId, {
-      questionId: questionId,
-      text: responseText,
-      ts: result.ts,
-      upvotes: new Set(),
-      downvotes: new Set(),
-    });
-
-    question.responses.push(responseId);
+    // Store response in database
+    await db.createResponse(responseId, questionId, responseText, result.ts);
     
     console.log(`✅ Response posted and tracked:`);
     console.log(`   Response ID: ${responseId}`);
@@ -593,10 +594,13 @@ app.event('reaction_added', async ({ event, client }) => {
   
   // Ensure workspace token is stored
   if (teamId && !workspaceTokens.has(teamId)) {
-    if (client.token) {
-      storeWorkspaceToken(teamId, client.token);
+    const dbToken = await db.getWorkspaceToken(teamId);
+    if (dbToken) {
+      workspaceTokens.set(teamId, dbToken);
+    } else if (client.token) {
+      await storeWorkspaceToken(teamId, client.token);
     } else if (initialToken) {
-      storeWorkspaceToken(teamId, initialToken);
+      await storeWorkspaceToken(teamId, initialToken);
       initialToken = null;
     }
   }
@@ -622,46 +626,31 @@ app.event('reaction_added', async ({ event, client }) => {
   const reactionChannel = event.item.channel;
 
   // Find the response this reaction is on - match both timestamp and channel
-  let responseId = null;
-  for (const [id, response] of responseStore.entries()) {
-    const question = questionStore.get(response.questionId);
-    if (question && 
-        response.ts === reactionTs && 
-        question.channel === reactionChannel &&
-        question.teamId === teamId) { // Also match workspace
-      responseId = id;
-      console.log(`✅ Found matching response: ${responseId}`);
-      break;
-    }
-  }
+  const responseId = await db.getResponseByTimestamp(teamId, reactionChannel, reactionTs);
 
   if (!responseId) {
     console.log('⚠️ Reaction not on a tracked response message');
     console.log(`Looking for ts: ${reactionTs}, channel: ${reactionChannel}, team: ${teamId}`);
-    console.log('Tracked responses:', Array.from(responseStore.keys()));
     return;
   }
 
-  const response = responseStore.get(responseId);
   const reaction = event.reaction;
   console.log(`📊 Processing reaction "${reaction}" on response ${responseId} by user ${event.user}`);
 
   // Handle thumbs up (upvote) - check multiple possible reaction names
   if (reaction === '+1' || reaction === 'thumbsup' || reaction === 'thumbsup_all' || reaction === '👍' || reaction === 'thumbs_up') {
     console.log('✅ Thumbs up detected - adding upvote');
-    response.upvotes.add(event.user);
-    // Remove from downvotes if present
-    response.downvotes.delete(event.user);
-    console.log(`📈 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
+    await db.addVote(responseId, event.user, 'upvote');
+    const votes = await db.getResponseVotes(responseId);
+    console.log(`📈 Upvotes: ${votes.upvotes.length}, Downvotes: ${votes.downvotes.length}`);
     await updateResponseMessage(responseId, teamId);
   }
   // Handle thumbs down (downvote) - check multiple possible reaction names
   else if (reaction === '-1' || reaction === 'thumbsdown' || reaction === 'thumbsdown_all' || reaction === '👎' || reaction === 'thumbs_down') {
     console.log('✅ Thumbs down detected - adding downvote');
-    response.downvotes.add(event.user);
-    // Remove from upvotes if present
-    response.upvotes.delete(event.user);
-    console.log(`📉 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
+    await db.addVote(responseId, event.user, 'downvote');
+    const votes = await db.getResponseVotes(responseId);
+    console.log(`📉 Upvotes: ${votes.upvotes.length}, Downvotes: ${votes.downvotes.length}`);
     await updateResponseMessage(responseId, teamId);
   } else {
     console.log(`ℹ️ Ignoring reaction: ${reaction} (not thumbs up/down)`);
@@ -688,33 +677,25 @@ app.event('reaction_removed', async ({ event, client }) => {
   const reactionTs = event.item.ts;
   const reactionChannel = event.item.channel;
 
-  let responseId = null;
-  for (const [id, response] of responseStore.entries()) {
-    const question = questionStore.get(response.questionId);
-    if (question && 
-        response.ts === reactionTs && 
-        question.channel === reactionChannel &&
-        question.teamId === teamId) { // Also match workspace
-      responseId = id;
-      break;
-    }
-  }
+  // Find the response this reaction is on
+  const responseId = await db.getResponseByTimestamp(teamId, reactionChannel, reactionTs);
 
   if (!responseId) {
     return;
   }
 
-  const response = responseStore.get(responseId);
   const reaction = event.reaction;
   console.log(`📊 Removing reaction "${reaction}" from response ${responseId}`);
 
   if (reaction === '+1' || reaction === 'thumbsup' || reaction === 'thumbsup_all' || reaction === '👍' || reaction === 'thumbs_up') {
-    response.upvotes.delete(event.user);
-    console.log(`📈 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
+    await db.removeVote(responseId, event.user);
+    const votes = await db.getResponseVotes(responseId);
+    console.log(`📈 Upvotes: ${votes.upvotes.length}, Downvotes: ${votes.downvotes.length}`);
     await updateResponseMessage(responseId, teamId);
   } else if (reaction === '-1' || reaction === 'thumbsdown' || reaction === 'thumbsdown_all' || reaction === '👎' || reaction === 'thumbs_down') {
-    response.downvotes.delete(event.user);
-    console.log(`📉 Upvotes: ${response.upvotes.size}, Downvotes: ${response.downvotes.size}`);
+    await db.removeVote(responseId, event.user);
+    const votes = await db.getResponseVotes(responseId);
+    console.log(`📉 Upvotes: ${votes.upvotes.length}, Downvotes: ${votes.downvotes.length}`);
     await updateResponseMessage(responseId, teamId);
   }
 });
@@ -722,7 +703,30 @@ app.event('reaction_removed', async ({ event, client }) => {
 // Start the app
 (async () => {
   try {
-    console.log('Starting Slack app with multi-workspace support...');
+    console.log('Starting Slack app with database support...');
+    
+    // Initialize database
+    if (process.env.DATABASE_URL) {
+      console.log('📦 Connecting to database...');
+      const dbConnected = await db.testConnection();
+      if (dbConnected) {
+        await db.initializeDatabase();
+        console.log('✅ Database initialized successfully');
+        
+        // Load existing workspace tokens from database
+        const tokens = await db.getAllWorkspaceTokens();
+        tokens.forEach((token, teamId) => {
+          workspaceTokens.set(teamId, token);
+        });
+        console.log(`✅ Loaded ${tokens.size} workspace token(s) from database`);
+      } else {
+        console.error('❌ Database connection failed. App will continue but data will not persist.');
+        console.error('   Set DATABASE_URL environment variable to enable database storage.');
+      }
+    } else {
+      console.log('⚠️ DATABASE_URL not set - using in-memory storage (data will be lost on restart)');
+      console.log('   To enable database storage, add PostgreSQL service in Railway and set DATABASE_URL');
+    }
     
     // Validate environment variables
     console.log('Signing Secret:', signingSecret ? `Set (${signingSecret.substring(0, 10)}...)` : '❌ MISSING');
@@ -733,7 +737,8 @@ app.event('reaction_removed', async ({ event, client }) => {
       console.error('Please set the following in Railway Variables:');
       console.error('  - SLACK_SIGNING_SECRET');
       console.error('  - SLACK_APP_TOKEN');
-      console.error('Note: SLACK_BOT_TOKEN is no longer required - tokens are stored per workspace');
+      console.error('  - DATABASE_URL (optional but recommended)');
+      console.error('Note: SLACK_BOT_TOKEN is optional - tokens are stored per workspace');
       process.exit(1);
     }
     
@@ -755,10 +760,11 @@ app.event('reaction_removed', async ({ event, client }) => {
     console.log(`⚡️ Slack app is running on port ${port}!`);
     console.log('Waiting for workspace connections...');
     console.log('');
-    console.log('📋 Multi-workspace support enabled:');
-    console.log('   - Install the app to each workspace via OAuth');
-    console.log('   - Each workspace will have its own bot token');
-    console.log('   - Questions and responses are tracked per workspace');
+    console.log('📋 Features enabled:');
+    console.log('   - Multi-workspace support');
+    console.log('   - Database persistence (if DATABASE_URL is set)');
+    console.log('   - Encrypted token storage');
+    console.log('   - Questions and responses tracked per workspace');
   } catch (error) {
     console.error('Failed to start app:', error);
     console.error('Error details:', {
