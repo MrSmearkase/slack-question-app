@@ -1,7 +1,8 @@
 display_information:
   name: "Anonymous Q and A Bot"
-  description: "Anonymous Q and A Bot - Post questions and collect anonymous responses with voting"
+  description: "Post questions and collect anonymous responses with voting. Perfect for gathering honest feedback, team surveys, and anonymous Q&A sessions."
   background_color: "#2c2d30"
+  long_description: "Anonymous Q and A Bot enables teams to ask questions and receive anonymous responses with a built-in voting system. Users can post questions to any channel, and team members can respond anonymously through a simple button click. All responses appear in threads with upvote/downvote reactions, and the app automatically tracks and displays point totals. Question posters can close voting to announce the winning response. Perfect for gathering honest feedback, team surveys, anonymous Q&A sessions, decision-making with community input, and retrospectives."
 features:
   bot_user:
     display_name: Anonymous Q and A Bot
@@ -12,6 +13,7 @@ features:
       usage_hint: What is your question?
       should_escape: false
 oauth_config:
+  redirect_urls: []
   scopes:
     bot:
       - chat:write

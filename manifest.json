@@ -1,8 +1,9 @@
 {
   "display_information": {
     "name": "Anonymous Q and A Bot",
-    "description": "Anonymous Q and A Bot - Post questions and collect anonymous responses with voting",
-    "background_color": "#2c2d30"
+    "description": "Post questions and collect anonymous responses with voting. Perfect for gathering honest feedback, team surveys, and anonymous Q&A sessions.",
+    "background_color": "#2c2d30",
+    "long_description": "Anonymous Q and A Bot enables teams to ask questions and receive anonymous responses with a built-in voting system. Users can post questions to any channel, and team members can respond anonymously through a simple button click. All responses appear in threads with upvote/downvote reactions, and the app automatically tracks and displays point totals. Question posters can close voting to announce the winning response. Perfect for:\n\n• Gathering honest feedback without attribution\n• Team surveys and polls\n• Anonymous Q&A sessions\n• Decision-making with community input\n• Retrospectives and team discussions\n\nAll responses are completely anonymous - the original responder is never identified. The app supports multiple workspaces and stores all data securely in an encrypted database."
   },
   "features": {
     "bot_user": {
@@ -19,9 +20,7 @@
     ]
   },
   "oauth_config": {
-    "redirect_urls": [
-      "https://slack.com/oauth/v2/authorize"
-    ],
+    "redirect_urls": [],
     "scopes": {
       "bot": [
         "chat:write",
@@ -49,5 +48,6 @@
     "org_deploy_enabled": false,
     "socket_mode_enabled": true,
     "token_rotation_enabled": false
-  }
+  },
+  "outgoing_domains": []
 }

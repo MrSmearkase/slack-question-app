@@ -42,6 +42,24 @@ function decrypt(text) {
 // Initialize database tables
 async function initializeDatabase() {
   try {
+    // Enhanced installation store for OAuth
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS installations (
+        team_id VARCHAR(255) PRIMARY KEY,
+        enterprise_id VARCHAR(255),
+        bot_token TEXT NOT NULL,
+        bot_id VARCHAR(255),
+        bot_user_id VARCHAR(255),
+        bot_scopes TEXT,
+        user_token TEXT,
+        user_id VARCHAR(255),
+        user_scopes TEXT,
+        installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Legacy table for backward compatibility
     await pool.query(`
       CREATE TABLE IF NOT EXISTS workspace_tokens (
         team_id VARCHAR(255) PRIMARY KEY,
@@ -106,15 +124,111 @@ async function initializeDatabase() {
   }
 }
 
-// Workspace Token Operations
-async function getWorkspaceToken(teamId) {
+// Installation Store Operations (OAuth-compatible)
+async function getInstallation(teamId, enterpriseId = null) {
   try {
     const result = await pool.query(
-      'SELECT bot_token FROM workspace_tokens WHERE team_id = $1',
+      'SELECT * FROM installations WHERE team_id = $1 AND ($2::text IS NULL OR enterprise_id = $2)',
+      [teamId, enterpriseId]
+    );
+    if (result.rows.length > 0) {
+      const row = result.rows[0];
+      return {
+        team: { id: row.team_id },
+        enterprise: row.enterprise_id ? { id: row.enterprise_id } : undefined,
+        bot: {
+          token: decrypt(row.bot_token),
+          id: row.bot_id,
+          userId: row.bot_user_id,
+          scopes: row.bot_scopes ? row.bot_scopes.split(',') : [],
+        },
+        user: row.user_token ? {
+          token: decrypt(row.user_token),
+          id: row.user_id,
+          scopes: row.user_scopes ? row.user_scopes.split(',') : [],
+        } : undefined,
+      };
+    }
+    return null;
+  } catch (error) {
+    console.error('Error getting installation:', error);
+    return null;
+  }
+}
+
+async function saveInstallation(installation) {
+  try {
+    const teamId = installation.team?.id;
+    const enterpriseId = installation.enterprise?.id;
+    const botToken = installation.bot?.token;
+    const botId = installation.bot?.id;
+    const botUserId = installation.bot?.userId;
+    const botScopes = installation.bot?.scopes?.join(',') || '';
+    const userToken = installation.user?.token;
+    const userId = installation.user?.id;
+    const userScopes = installation.user?.scopes?.join(',') || '';
+
+    await pool.query(
+      `INSERT INTO installations (
+        team_id, enterprise_id, bot_token, bot_id, bot_user_id, bot_scopes,
+        user_token, user_id, user_scopes, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
+      ON CONFLICT (team_id) 
+      DO UPDATE SET 
+        enterprise_id = $2,
+        bot_token = $3,
+        bot_id = $4,
+        bot_user_id = $5,
+        bot_scopes = $6,
+        user_token = $7,
+        user_id = $8,
+        user_scopes = $9,
+        updated_at = CURRENT_TIMESTAMP`,
+      [
+        teamId, enterpriseId, encrypt(botToken), botId, botUserId, botScopes,
+        userToken ? encrypt(userToken) : null, userId, userScopes
+      ]
+    );
+    console.log(`✅ Stored installation for workspace ${teamId}`);
+    return true;
+  } catch (error) {
+    console.error('Error saving installation:', error);
+    return false;
+  }
+}
+
+async function deleteInstallation(teamId, enterpriseId = null) {
+  try {
+    await pool.query(
+      'DELETE FROM installations WHERE team_id = $1 AND ($2::text IS NULL OR enterprise_id = $2)',
+      [teamId, enterpriseId]
+    );
+    console.log(`✅ Deleted installation for workspace ${teamId}`);
+    return true;
+  } catch (error) {
+    console.error('Error deleting installation:', error);
+    return false;
+  }
+}
+
+// Workspace Token Operations (backward compatibility)
+async function getWorkspaceToken(teamId) {
+  try {
+    // Try new installations table first
+    const result = await pool.query(
+      'SELECT bot_token FROM installations WHERE team_id = $1',
       [teamId]
     );
     if (result.rows.length > 0) {
       return decrypt(result.rows[0].bot_token);
+    }
+    // Fallback to legacy table
+    const legacyResult = await pool.query(
+      'SELECT bot_token FROM workspace_tokens WHERE team_id = $1',
+      [teamId]
+    );
+    if (legacyResult.rows.length > 0) {
+      return decrypt(legacyResult.rows[0].bot_token);
     }
     return null;
   } catch (error) {
@@ -123,9 +237,19 @@ async function getWorkspaceToken(teamId) {
   }
 }
 
-async function setWorkspaceToken(teamId, botToken) {
+async function setWorkspaceToken(teamId, botToken, botId = null, botUserId = null) {
   try {
+    // Store in new installations table
     const encryptedToken = encrypt(botToken);
+    await pool.query(
+      `INSERT INTO installations (team_id, bot_token, bot_id, bot_user_id, updated_at)
+       VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+       ON CONFLICT (team_id) 
+       DO UPDATE SET bot_token = $2, bot_id = COALESCE($3, installations.bot_id), 
+                     bot_user_id = COALESCE($4, installations.bot_user_id), updated_at = CURRENT_TIMESTAMP`,
+      [teamId, encryptedToken, botId, botUserId]
+    );
+    // Also update legacy table for backward compatibility
     await pool.query(
       `INSERT INTO workspace_tokens (team_id, bot_token, updated_at)
        VALUES ($1, $2, CURRENT_TIMESTAMP)
@@ -143,12 +267,22 @@ async function setWorkspaceToken(teamId, botToken) {
 
 async function getAllWorkspaceTokens() {
   try {
-    const result = await pool.query('SELECT team_id, bot_token FROM workspace_tokens');
+    const result = await pool.query('SELECT team_id, bot_token FROM installations');
     const tokens = new Map();
     for (const row of result.rows) {
       const decrypted = decrypt(row.bot_token);
       if (decrypted) {
         tokens.set(row.team_id, decrypted);
+      }
+    }
+    // Also check legacy table
+    const legacyResult = await pool.query('SELECT team_id, bot_token FROM workspace_tokens');
+    for (const row of legacyResult.rows) {
+      if (!tokens.has(row.team_id)) {
+        const decrypted = decrypt(row.bot_token);
+        if (decrypted) {
+          tokens.set(row.team_id, decrypted);
+        }
       }
     }
     return tokens;
@@ -353,7 +487,11 @@ module.exports = {
   pool,
   initializeDatabase,
   testConnection,
-  // Workspace tokens
+  // Installation store (OAuth)
+  getInstallation,
+  saveInstallation,
+  deleteInstallation,
+  // Workspace tokens (backward compatibility)
   getWorkspaceToken,
   setWorkspaceToken,
   getAllWorkspaceTokens,

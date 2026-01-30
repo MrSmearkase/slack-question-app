@@ -44,41 +44,57 @@ const app = new App({
   signingSecret: signingSecret,
   socketMode: true,
   appToken: appToken,
-  // Don't set a default token - we'll use workspace-specific tokens
+  // OAuth-compatible authorization using installation store
   authorize: async ({ teamId, enterpriseId }) => {
-    // First check cache
-    let token = workspaceTokens.get(teamId);
-    
-    // If not in cache, try database
-    if (!token) {
-      token = await db.getWorkspaceToken(teamId);
-      if (token) {
-        workspaceTokens.set(teamId, token); // Cache it
-        console.log(`✅ Loaded token for workspace ${teamId} from database`);
+    try {
+      // Try to get full installation from database
+      const installation = await db.getInstallation(teamId, enterpriseId);
+      
+      if (installation && installation.bot && installation.bot.token) {
+        // Cache token for quick access
+        workspaceTokens.set(teamId, installation.bot.token);
+        return {
+          botToken: installation.bot.token,
+          botId: installation.bot.id,
+          botUserId: installation.bot.userId,
+        };
       }
+      
+      // Fallback: try legacy token storage
+      let token = workspaceTokens.get(teamId);
+      if (!token) {
+        token = await db.getWorkspaceToken(teamId);
+        if (token) {
+          workspaceTokens.set(teamId, token);
+          console.log(`✅ Loaded token for workspace ${teamId} from database`);
+        }
+      }
+      
+      // If no token found, try to use initial token from env (for first workspace)
+      if (!token && initialToken) {
+        token = initialToken;
+        await db.setWorkspaceToken(teamId, token);
+        workspaceTokens.set(teamId, token);
+        console.log(`✅ Using initial token for workspace ${teamId} and storing in database`);
+      }
+      
+      // If we have a token, return it
+      if (token) {
+        return {
+          botToken: token,
+          botId: undefined, // Will be fetched automatically
+          botUserId: undefined, // Will be fetched automatically
+        };
+      }
+      
+      // Last resort: return undefined to let Bolt handle it
+      // The token will be captured from client.token in handlers
+      console.warn(`⚠️ No token available for workspace ${teamId} - will attempt to capture from client`);
+      return undefined;
+    } catch (error) {
+      console.error(`❌ Error in authorize for workspace ${teamId}:`, error);
+      return undefined;
     }
-    
-    // If no token found, try to use initial token from env (for first workspace)
-    if (!token && initialToken) {
-      token = initialToken;
-      await db.setWorkspaceToken(teamId, token);
-      workspaceTokens.set(teamId, token);
-      console.log(`✅ Using initial token for workspace ${teamId} and storing in database`);
-    }
-    
-    // If we have a token, return it
-    if (token) {
-      return {
-        botToken: token,
-        botId: undefined, // Will be fetched automatically
-        botUserId: undefined, // Will be fetched automatically
-      };
-    }
-    
-    // Last resort: return undefined to let Bolt handle it
-    // The token will be captured from client.token in handlers
-    console.warn(`⚠️ No token available for workspace ${teamId} - will attempt to capture from client`);
-    return undefined;
   },
 });
 
@@ -92,10 +108,22 @@ function getWorkspaceClient(teamId) {
 }
 
 // Helper to store workspace token when first encountered
-async function storeWorkspaceToken(teamId, token) {
+async function storeWorkspaceToken(teamId, token, botId = null, botUserId = null) {
   if (teamId && token) {
-    // Store in database (encrypted)
-    await db.setWorkspaceToken(teamId, token);
+    // Try to get bot info from auth.test if not provided
+    if (!botId || !botUserId) {
+      try {
+        const testClient = new app.client.constructor({ token });
+        const authResult = await testClient.auth.test();
+        botId = authResult.bot_id || botId;
+        botUserId = authResult.user_id || botUserId;
+      } catch (error) {
+        console.log('Could not fetch bot info, storing token only');
+      }
+    }
+    
+    // Store in database (encrypted) with full installation info
+    await db.setWorkspaceToken(teamId, token, botId, botUserId);
     // Also cache in memory
     workspaceTokens.set(teamId, token);
     console.log(`✅ Stored token (encrypted) for workspace ${teamId}`);
@@ -277,7 +305,21 @@ app.command('/ask-question', async ({ command, ack, respond, client }) => {
     });
   } catch (error) {
     console.error('Error posting question:', error);
-    await respond('Failed to post question. Please try again.');
+    const errorMessage = error.data?.error === 'not_in_channel' 
+      ? 'The bot needs to be invited to this channel. Please type `/invite @Anonymous Q and A Bot` and try again.'
+      : 'Failed to post question. Please try again or contact support if the issue persists.';
+    await respond({
+      text: '❌ Error',
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Error:* ${errorMessage}`,
+          },
+        },
+      ],
+    });
   }
 });
 
@@ -439,7 +481,7 @@ app.action('respond_to_question', async ({ ack, body, client }) => {
     await client.chat.postEphemeral({
       channel: body.channel.id,
       user: body.user.id,
-      text: 'Question not found.',
+      text: '❌ Question not found. It may have been deleted or the app was restarted. Please post a new question.',
     });
     return;
   }
@@ -449,7 +491,7 @@ app.action('respond_to_question', async ({ ack, body, client }) => {
     await client.chat.postEphemeral({
       channel: body.channel.id,
       user: body.user.id,
-      text: 'Voting is closed for this question. No new responses can be submitted.',
+      text: '🔒 Voting is closed for this question. No new responses can be submitted.',
     });
     return;
   }

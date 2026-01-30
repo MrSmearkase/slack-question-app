@@ -1,6 +1,6 @@
 # Anonymous Q and A Bot
 
-A Slack app that allows users to post questions and collect anonymous responses with voting functionality. Supports multiple workspaces!
+A Slack app that allows users to post questions and collect anonymous responses with voting functionality. Supports multiple workspaces and is ready for Slack App Directory submission!
 
 ## Features
 
