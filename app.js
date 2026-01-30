@@ -28,6 +28,12 @@ console.error = function(...args) {
 const signingSecret = process.env.SLACK_SIGNING_SECRET?.trim();
 const appToken = process.env.SLACK_APP_TOKEN?.trim();
 
+// Load initial token from env if provided (for backward compatibility)
+let initialToken = null;
+if (process.env.SLACK_BOT_TOKEN) {
+  initialToken = process.env.SLACK_BOT_TOKEN.trim();
+}
+
 // Store workspace-specific bot tokens
 // In production, use a database instead
 const workspaceTokens = new Map(); // teamId -> botToken
@@ -44,16 +50,35 @@ const app = new App({
   appToken: appToken,
   // Don't set a default token - we'll use workspace-specific tokens
   authorize: async ({ teamId, enterpriseId }) => {
-    const token = workspaceTokens.get(teamId);
-    if (!token) {
-      console.error(`❌ No token found for workspace ${teamId}`);
-      throw new Error(`No token found for workspace ${teamId}. Please install the app to this workspace.`);
+    let token = workspaceTokens.get(teamId);
+    
+    // If no token found, try to use initial token from env (for first workspace)
+    if (!token && initialToken) {
+      token = initialToken;
+      workspaceTokens.set(teamId, token);
+      console.log(`✅ Using initial token for workspace ${teamId}`);
     }
-    return {
-      botToken: token,
-      botId: undefined, // Will be fetched automatically
-      botUserId: undefined, // Will be fetched automatically
-    };
+    
+    // If still no token, use initialToken as fallback (for backward compatibility)
+    // This allows the first workspace to work without explicit installation
+    if (!token && initialToken) {
+      token = initialToken;
+      console.log(`⚠️ Using fallback initial token for workspace ${teamId}`);
+    }
+    
+    // If we have a token, return it
+    if (token) {
+      return {
+        botToken: token,
+        botId: undefined, // Will be fetched automatically
+        botUserId: undefined, // Will be fetched automatically
+      };
+    }
+    
+    // Last resort: return undefined to let Bolt handle it
+    // The token will be captured from client.token in handlers
+    console.warn(`⚠️ No token available for workspace ${teamId} - will attempt to capture from client`);
+    return undefined;
   },
 });
 
@@ -718,9 +743,8 @@ app.event('reaction_removed', async ({ event, client }) => {
       process.exit(1);
     }
     
-    // Load initial token from env if provided (for backward compatibility)
-    if (process.env.SLACK_BOT_TOKEN) {
-      const initialToken = process.env.SLACK_BOT_TOKEN.trim();
+    // Log initial token status
+    if (initialToken) {
       console.log('⚠️ SLACK_BOT_TOKEN provided in environment.');
       console.log('   This will be used for the first workspace that connects.');
       console.log('   For multi-workspace support, install the app via OAuth to each workspace.');

@@ -1,127 +1,164 @@
-# Unified Notifications App
+# Anonymous Q and A Bot
 
-A unified notifications aggregator that collects notifications from Twitter, Reddit, Instagram, and Chess.com into a single, beautiful feed.
+A Slack app that allows users to post questions and collect anonymous responses with voting functionality. Supports multiple workspaces!
 
 ## Features
 
-- **Twitter Integration**: Fetches replies, likes, and mentions from multiple Twitter accounts
-- **Reddit Integration**: Monitors replies and mentions on your Reddit account
-- **Instagram Integration**: Tracks comments and likes on your Instagram posts
-- **Chess.com Integration**: Monitors comments on specified articles and forum threads
-- **Beautiful Web Interface**: Modern, responsive UI with filtering and real-time updates
-- **Auto-refresh**: Automatically fetches new notifications every 5 minutes
+- **Post Questions**: Use `/ask-question` command to post a question to any channel
+- **Anonymous Responses**: Users can click a button to respond anonymously via a modal
+- **Threaded Responses**: All responses appear in a thread under the original question
+- **Voting System**: Users can upvote/downvote responses using thumbs up/down emoji reactions
+- **Point Tracking**: Responses automatically display their point total (upvotes - downvotes)
+- **Close Voting**: Question posters can close voting and announce the winning response
+- **Multi-Workspace Support**: Install the app to multiple Slack workspaces
 
 ## Setup Instructions
 
-### 1. Install Dependencies
+### 1. Create a Slack App
+
+1. Go to [https://api.slack.com/apps](https://api.slack.com/apps)
+2. Click "Create New App" → "From scratch" or use the manifest
+3. Name your app and select your workspace
+4. Click "Create App"
+
+### 2. Configure OAuth & Permissions
+
+1. In the sidebar, go to **OAuth & Permissions**
+2. Under **Scopes** → **Bot Token Scopes**, add the following:
+   - `chat:write` - Post messages
+   - `chat:write.public` - Post messages in channels the app isn't in
+   - `commands` - Use slash commands
+   - `reactions:read` - Read reactions
+   - `reactions:write` - Add reactions
+   - `channels:read` - View basic channel information
+   - `groups:read` - View basic private channel information
+   - `im:read` - View basic direct message information
+   - `mpim:read` - View basic group direct message information
+
+3. Under **Redirect URLs**, add:
+   ```
+   https://slack.com/oauth/v2/authorize
+   ```
+
+4. Scroll up and click **Install to Workspace**
+5. Authorize the app and copy the **Bot User OAuth Token** (starts with `xoxb-`)
+
+### 3. Enable Socket Mode
+
+1. In the sidebar, go to **Socket Mode**
+2. Toggle **Enable Socket Mode** to ON
+3. Click **Create Token** → Name it (e.g., "Socket Token")
+4. Select scope: `connections:write`
+5. Copy the **App-Level Token** (starts with `xapp-`)
+
+### 4. Create Slash Command
+
+1. In the sidebar, go to **Slash Commands**
+2. Click **Create New Command**
+3. Configure:
+   - **Command**: `/ask-question`
+   - **Request URL**: (leave empty for Socket Mode)
+   - **Short Description**: Post a question to the channel
+   - **Usage Hint**: `What is your question?`
+4. Click **Save**
+
+### 5. Subscribe to Events
+
+1. In the sidebar, go to **Event Subscriptions**
+2. Toggle **Enable Events** to ON
+3. Under **Subscribe to bot events**, add:
+   - `reaction_added`
+   - `reaction_removed`
+4. Click **Save Changes**
+
+### 6. Enable Distribution (for Multi-Workspace)
+
+1. In the sidebar, go to **Manage Distribution**
+2. Under **Share Your App**, create a **Shareable Link**
+3. Use this link to install the app to additional workspaces
+
+### 7. Install Dependencies
 
 ```bash
 npm install
 ```
 
-### 2. Configure API Credentials
+### 8. Configure Environment Variables
 
-Create a `.env` file in the project root with your API credentials:
+Create a `.env` file in the project root:
 
 ```env
-# Twitter API (X API v2)
-# Get your Bearer Token from https://developer.twitter.com/en/portal/dashboard
-TWITTER_BEARER_TOKEN=your_twitter_bearer_token_here
-
-# Reddit API
-# Create an app at https://www.reddit.com/prefs/apps
-REDDIT_CLIENT_ID=your_reddit_client_id
-REDDIT_CLIENT_SECRET=your_reddit_client_secret
-REDDIT_USERNAME=SamSCopeland
-REDDIT_PASSWORD=your_reddit_password
-
-# Instagram Graph API
-# Create an app at https://developers.facebook.com/apps/
-INSTAGRAM_ACCESS_TOKEN=your_instagram_access_token
-INSTAGRAM_USER_ID=your_instagram_user_id
-
-# Chess.com (optional - comma-separated URLs)
-CHESS_COM_ARTICLES=https://www.chess.com/article1,https://www.chess.com/article2
-CHESS_COM_FORUMS=https://www.chess.com/forum/view/general/thread1
-
-# Server
+SLACK_BOT_TOKEN=xoxb-your-bot-token-here
+SLACK_SIGNING_SECRET=your-signing-secret-here
+SLACK_APP_TOKEN=xapp-your-app-token-here
 PORT=3000
 ```
 
-### 3. Get API Credentials
+You can find your **Signing Secret** in **Basic Information** → **App Credentials**.
 
-#### Twitter/X API
-1. Go to [Twitter Developer Portal](https://developer.twitter.com/en/portal/dashboard)
-2. Create a new app or use an existing one
-3. Generate a Bearer Token
-4. Add it to your `.env` file
+**Note**: For multi-workspace support, `SLACK_BOT_TOKEN` is optional - tokens are captured automatically per workspace.
 
-#### Reddit API
-1. Go to [Reddit App Preferences](https://www.reddit.com/prefs/apps)
-2. Click "Create App" or "Create Another App"
-3. Choose "script" as the app type
-4. Copy the client ID (under the app name) and secret
-5. Add them to your `.env` file along with your Reddit username and password
-
-#### Instagram Graph API
-1. Go to [Facebook Developers](https://developers.facebook.com/apps/)
-2. Create a new app
-3. Add Instagram Basic Display product
-4. Follow the setup process to get an access token
-5. Get your Instagram User ID from the API
-6. Add both to your `.env` file
-
-#### Chess.com
-- Currently, Chess.com doesn't have a public API for comments
-- You can add article and forum URLs to monitor (comma-separated)
-- Full implementation would require web scraping (not included for legal/compliance reasons)
-
-### 4. Run the App
+### 9. Run the App
 
 ```bash
 npm start
 ```
 
-The app will be available at `http://localhost:3000`
-
 ## Usage
 
-1. **View All Notifications**: Open the app in your browser to see all notifications from all sources
-2. **Filter by Source**: Use the "All Sources" dropdown to filter by Twitter, Reddit, Instagram, or Chess.com
-3. **Filter by Type**: Filter by mentions, replies, comments, or likes
-4. **Auto-refresh**: The app automatically fetches new notifications every 5 minutes
-5. **Manual Refresh**: Click the "Refresh" button to manually fetch new notifications
+### Posting a Question
 
-## API Endpoints
+In any Slack channel, type:
+```
+/ask-question What is the best programming language?
+```
 
-- `GET /` - Main web interface
-- `GET /api/notifications` - Get notifications (supports `?source=`, `?type=`, `?limit=`, `?offset=`)
-- `GET /api/stats` - Get statistics about notifications
+The app will post a message with a "Respond" button.
 
-## Account Configuration
+### Responding to Questions
 
-The app is configured to monitor:
-- **Twitter**: @Sam_Copeland and @samcopelandchess
-- **Reddit**: u/SamSCopeland
-- **Instagram**: sam_copeland
-- **Chess.com**: Articles and forums specified in `.env`
+1. Click the **Respond** button on any question
+2. Enter your response in the modal that appears
+3. Click **Submit**
+4. Your response will be posted anonymously in a thread with 👍 and 👎 reactions
 
-## Limitations
+### Voting on Responses
 
-1. **Twitter Likes**: Twitter API v2 doesn't provide direct access to who liked your tweets. Only like counts are available.
-2. **Instagram Likes**: Instagram Graph API provides total like counts but not individual like notifications.
-3. **Chess.com**: Chess.com doesn't have a public API for comments. Full implementation would require web scraping.
-4. **Rate Limits**: Each API has rate limits. The app fetches every 5 minutes to stay within limits.
+1. Click the 👍 (thumbs up) reaction to upvote a response
+2. Click the 👎 (thumbs down) reaction to downvote a response
+3. The response will automatically update to show the point total
 
-## Troubleshooting
+### Closing Voting
 
-- **No notifications appearing**: Check that your API credentials are correct and that the accounts exist
-- **Twitter errors**: Ensure your Bearer Token has the correct permissions (read access)
-- **Reddit errors**: Verify your app credentials and that you're using a "script" type app
-- **Instagram errors**: Make sure your access token hasn't expired and has the correct permissions
+1. Click the **Close Voting** button on your question
+2. The app will announce the response with the most votes
+3. New responses will be disabled
+
+## Multi-Workspace Support
+
+The app supports multiple Slack workspaces:
+
+- Each workspace gets its own bot token (automatically captured)
+- Questions and responses are tracked separately per workspace
+- Install the app to each workspace using the shareable link from **Manage Distribution**
+
+See `MULTI_WORKSPACE_SETUP.md` for detailed instructions.
+
+## Deployment
+
+See `RAILWAY_SETUP.md` for instructions on deploying to Railway or other cloud platforms.
 
 ## Notes
 
-- Notifications are stored in memory. For production use, consider using a database (PostgreSQL, MongoDB, etc.)
-- The app fetches notifications every 5 minutes. Adjust the cron schedule in `app.js` if needed
-- Some APIs may require additional setup or approval processes
+- Responses are stored in memory. For production use, consider using a database (e.g., PostgreSQL, MongoDB)
+- The app uses Socket Mode, so it doesn't require a public URL
+- All responses are posted anonymously - the original responder is not identified
+- Workspace tokens are stored in memory. For production, use a database to persist them
+
+## Troubleshooting
+
+- **App not responding**: Check that Socket Mode is enabled and the app token is correct
+- **Commands not working**: Ensure the slash command is installed in your workspace
+- **Reactions not updating points**: Verify that `reaction_added` and `reaction_removed` events are subscribed
+- **"dispatch_failed" error**: Make sure `SLACK_BOT_TOKEN` is set for the first workspace, or install the app via OAuth
+- **"invalid_team_for_non_distributed_app"**: Enable distribution in **Manage Distribution** → **Share Your App**
